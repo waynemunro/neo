@@ -1,6 +1,7 @@
 ﻿using Neo.Cryptography.ECC;
 using Neo.IO;
 using Neo.IO.Json;
+using Neo.SmartContract;
 using Neo.Wallets;
 using System;
 using System.Collections.Generic;
@@ -86,9 +87,9 @@ namespace Neo.Core
         protected override void OnDeserialized()
         {
             base.OnDeserialized();
-            if (AssetType == AssetType.GoverningToken && !Hash.Equals(Blockchain.SystemShare.Hash))
+            if (AssetType == AssetType.GoverningToken && !Hash.Equals(Blockchain.GoverningToken.Hash))
                 throw new FormatException();
-            if (AssetType == AssetType.UtilityToken && !Hash.Equals(Blockchain.SystemCoin.Hash))
+            if (AssetType == AssetType.UtilityToken && !Hash.Equals(Blockchain.UtilityToken.Hash))
                 throw new FormatException();
         }
 

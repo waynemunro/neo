@@ -36,9 +36,9 @@ namespace Neo.Cryptography
             return true;
         }
 
-        public void GetBits(byte[] bits)
+        public void GetBits(byte[] newBits)
         {
-            bits.CopyTo(bits, 0);
+            bits.CopyTo(newBits, 0);
         }
     }
 }

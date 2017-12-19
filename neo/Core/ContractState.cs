@@ -1,29 +1,51 @@
 ﻿using Neo.IO;
 using Neo.IO.Json;
+using Neo.SmartContract;
 using System.IO;
+using System.Linq;
 
 namespace Neo.Core
 {
     public class ContractState : StateBase, ICloneable<ContractState>
     {
-        public FunctionCode Code;
-        public bool HasStorage;
+        public byte[] Script;
+        public ContractParameterType[] ParameterList;
+        public ContractParameterType ReturnType;
+        public ContractPropertyState ContractProperties;
         public string Name;
         public string CodeVersion;
         public string Author;
         public string Email;
         public string Description;
 
-        public UInt160 ScriptHash => Code.ScriptHash;
 
-        public override int Size => base.Size + Code.Size + sizeof(bool) + Name.GetVarSize() + CodeVersion.GetVarSize() + Author.GetVarSize() + Email.GetVarSize() + Description.GetVarSize();
+        public bool HasStorage => ContractProperties.HasFlag(ContractPropertyState.HasStorage);
+
+        public bool HasDynamicInvoke => ContractProperties.HasFlag(ContractPropertyState.HasDynamicInvoke);
+
+        private UInt160 _scriptHash;
+        public UInt160 ScriptHash
+        {
+            get
+            {
+                if (_scriptHash == null)
+                {
+                    _scriptHash = Script.ToScriptHash();
+                }
+                return _scriptHash;
+            }
+        }
+
+        public override int Size => base.Size + Script.GetVarSize() + ParameterList.GetVarSize() + sizeof(ContractParameterType) + sizeof(bool) + Name.GetVarSize() + CodeVersion.GetVarSize() + Author.GetVarSize() + Email.GetVarSize() + Description.GetVarSize();
 
         ContractState ICloneable<ContractState>.Clone()
         {
             return new ContractState
             {
-                Code = Code,
-                HasStorage = HasStorage,
+                Script = Script,
+                ParameterList = ParameterList,
+                ReturnType = ReturnType,
+                ContractProperties = ContractProperties,
                 Name = Name,
                 CodeVersion = CodeVersion,
                 Author = Author,
@@ -35,8 +57,10 @@ namespace Neo.Core
         public override void Deserialize(BinaryReader reader)
         {
             base.Deserialize(reader);
-            Code = reader.ReadSerializable<FunctionCode>();
-            HasStorage = reader.ReadBoolean();
+            Script = reader.ReadVarBytes();
+            ParameterList = reader.ReadVarBytes().Select(p => (ContractParameterType)p).ToArray();
+            ReturnType = (ContractParameterType)reader.ReadByte();
+            ContractProperties = (ContractPropertyState)reader.ReadByte();
             Name = reader.ReadVarString();
             CodeVersion = reader.ReadVarString();
             Author = reader.ReadVarString();
@@ -46,8 +70,10 @@ namespace Neo.Core
 
         void ICloneable<ContractState>.FromReplica(ContractState replica)
         {
-            Code = replica.Code;
-            HasStorage = replica.HasStorage;
+            Script = replica.Script;
+            ParameterList = replica.ParameterList;
+            ReturnType = replica.ReturnType;
+            ContractProperties = replica.ContractProperties;
             Name = replica.Name;
             CodeVersion = replica.CodeVersion;
             Author = replica.Author;
@@ -58,8 +84,10 @@ namespace Neo.Core
         public override void Serialize(BinaryWriter writer)
         {
             base.Serialize(writer);
-            writer.Write(Code);
-            writer.Write(HasStorage);
+            writer.WriteVarBytes(Script);
+            writer.WriteVarBytes(ParameterList.Cast<byte>().ToArray());
+            writer.Write((byte)ReturnType);
+            writer.Write((byte)ContractProperties);
             writer.WriteVarString(Name);
             writer.WriteVarString(CodeVersion);
             writer.WriteVarString(Author);
@@ -70,13 +98,18 @@ namespace Neo.Core
         public override JObject ToJson()
         {
             JObject json = base.ToJson();
-            json["code"] = Code.ToJson();
-            json["storage"] = HasStorage;
+            json["hash"] = ScriptHash.ToString();
+            json["script"] = Script.ToHexString();
+            json["parameters"] = new JArray(ParameterList.Select(p => (JObject)p));
+            json["returntype"] = ReturnType;
             json["name"] = Name;
             json["code_version"] = CodeVersion;
             json["author"] = Author;
             json["email"] = Email;
             json["description"] = Description;
+            json["properties"] = new JObject();
+            json["properties"]["storage"] = HasStorage;
+            json["properties"]["dynamic_invoke"] = HasDynamicInvoke;
             return json;
         }
     }

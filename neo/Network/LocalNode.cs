@@ -85,6 +85,10 @@ namespace Neo.Network
 
         private async void AcceptPeers()
         {
+#if !NET47
+            //There is a bug in .NET Core 2.0 that blocks async method which returns void.
+            await Task.Yield();
+#endif
             while (!cancellationTokenSource.IsCancellationRequested)
             {
                 Socket socket;
@@ -136,14 +140,20 @@ namespace Neo.Network
                 {
                     transactions = transactions.Where(p => !mem_pool.ContainsKey(p.Hash) && !Blockchain.Default.ContainsTransaction(p.Hash)).ToArray();
                     if (transactions.Length == 0) continue;
+
+                    Transaction[] tmpool = mem_pool.Values.Concat(transactions).ToArray();
+
                     transactions.AsParallel().ForAll(tx =>
                     {
-                        if (tx.Verify(mem_pool.Values.Concat(transactions)))
+                        if (tx.Verify(tmpool))
                             verified.Add(tx);
                     });
+
                     if (verified.Count == 0) continue;
+
                     foreach (Transaction tx in verified)
                         mem_pool.Add(tx.Hash, tx);
+
                     CheckMemPool();
                 }
                 RelayDirectly(verified);
@@ -163,6 +173,7 @@ namespace Neo.Network
 
         private void Blockchain_PersistCompleted(object sender, Block block)
         {
+            Transaction[] remain;
             lock (mem_pool)
             {
                 foreach (Transaction tx in block.Transactions)
@@ -170,14 +181,15 @@ namespace Neo.Network
                     mem_pool.Remove(tx.Hash);
                 }
                 if (mem_pool.Count == 0) return;
-                Transaction[] remain = mem_pool.Values.ToArray();
+
+                remain = mem_pool.Values.ToArray();
                 mem_pool.Clear();
-                lock (temp_pool)
-                {
-                    temp_pool.UnionWith(remain);
-                }
-                new_tx_event.Set();
             }
+            lock (temp_pool)
+            {
+                temp_pool.UnionWith(remain);
+            }
+            new_tx_event.Set();
         }
 
         private static void CheckMemPool()
@@ -356,15 +368,18 @@ namespace Neo.Network
 
         public static void LoadState(Stream stream)
         {
-            unconnectedPeers.Clear();
-            using (BinaryReader reader = new BinaryReader(stream, Encoding.ASCII, true))
+            lock (unconnectedPeers)
             {
-                int count = reader.ReadInt32();
-                for (int i = 0; i < count; i++)
+                unconnectedPeers.Clear();
+                using (BinaryReader reader = new BinaryReader(stream, Encoding.ASCII, true))
                 {
-                    IPAddress address = new IPAddress(reader.ReadBytes(4));
-                    int port = reader.ReadUInt16();
-                    unconnectedPeers.Add(new IPEndPoint(address.MapToIPv6(), port));
+                    int count = reader.ReadInt32();
+                    for (int i = 0; i < count; i++)
+                    {
+                        IPAddress address = new IPAddress(reader.ReadBytes(4));
+                        int port = reader.ReadUInt16();
+                        unconnectedPeers.Add(new IPEndPoint(address.MapToIPv6(), port));
+                    }
                 }
             }
         }
@@ -399,10 +414,9 @@ namespace Neo.Network
             InventoryReceivingEventArgs args = new InventoryReceivingEventArgs(inventory);
             InventoryReceiving?.Invoke(this, args);
             if (args.Cancel) return false;
-            if (inventory is Block)
+            if (inventory is Block block)
             {
                 if (Blockchain.Default == null) return false;
-                Block block = (Block)inventory;
                 if (Blockchain.Default.ContainsBlock(block.Hash)) return false;
                 if (!Blockchain.Default.AddBlock(block)) return false;
             }
@@ -569,6 +583,7 @@ namespace Neo.Network
                     if (port > 0)
                     {
                         listener = new TcpListener(IPAddress.Any, port);
+                        listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, 1);
                         try
                         {
                             listener.Start();

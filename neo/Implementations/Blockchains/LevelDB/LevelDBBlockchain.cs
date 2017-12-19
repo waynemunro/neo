@@ -3,6 +3,7 @@ using Neo.Cryptography;
 using Neo.Cryptography.ECC;
 using Neo.IO;
 using Neo.IO.Caching;
+using Neo.IO.Data.LevelDB;
 using Neo.SmartContract;
 using System;
 using System.Collections.Generic;
@@ -288,9 +289,7 @@ namespace Neo.Implementations.Blockchains.LevelDB
             return value.ToArray().ToInt64(0);
         }
 
-        public DataCache<TKey, TValue> GetTable<TKey, TValue>()
-            where TKey : IEquatable<TKey>, ISerializable, new()
-            where TValue : class, ISerializable, new()
+        public override DataCache<TKey, TValue> CreateCache<TKey, TValue>()
         {
             Type t = typeof(TValue);
             if (t == typeof(AccountState)) return new DbCache<TKey, TValue>(db, DataEntryPrefix.ST_Account);
@@ -359,22 +358,47 @@ namespace Neo.Implementations.Blockchains.LevelDB
             }
         }
 
+        public override IEnumerable<TransactionOutput> GetUnspent(UInt256 hash)
+        {
+            ReadOptions options = new ReadOptions();
+            using (options.Snapshot = db.GetSnapshot())
+            {
+                List<TransactionOutput> outputs = new List<TransactionOutput>();
+                UnspentCoinState state = db.TryGet<UnspentCoinState>(options, DataEntryPrefix.ST_Coin, hash);
+                if (state != null)
+                {
+                    int height;
+                    Transaction tx = GetTransaction(options, hash, out height);
+                    for (int i = 0; i < state.Items.Length; i++)
+                    {
+                        if (!state.Items[i].HasFlag(CoinState.Spent))
+                        {
+                            outputs.Add(tx.Outputs[i]);
+                        }
+
+                    }
+                }
+                return outputs;
+            }
+        }
+
         public override IEnumerable<VoteState> GetVotes(IEnumerable<Transaction> others)
         {
             ReadOptions options = new ReadOptions();
             using (options.Snapshot = db.GetSnapshot())
             {
-                var inputs = others.SelectMany(p => p.Inputs).GroupBy(p => p.PrevHash, (k, g) =>
+                IList<Transaction> transactions = others as IList<Transaction> ?? others.ToList();
+                var inputs = transactions.SelectMany(p => p.Inputs).GroupBy(p => p.PrevHash, (k, g) =>
                 {
                     int height;
                     Transaction tx = GetTransaction(options, k, out height);
                     return g.Select(p => tx.Outputs[p.PrevIndex]);
-                }).SelectMany(p => p).Where(p => p.AssetId.Equals(SystemShare.Hash)).Select(p => new
+                }).SelectMany(p => p).Where(p => p.AssetId.Equals(GoverningToken.Hash)).Select(p => new
                 {
                     p.ScriptHash,
                     Value = -p.Value
                 });
-                var outputs = others.SelectMany(p => p.Outputs).Where(p => p.AssetId.Equals(SystemShare.Hash)).Select(p => new
+                var outputs = transactions.SelectMany(p => p.Outputs).Where(p => p.AssetId.Equals(GoverningToken.Hash)).Select(p => new
                 {
                     p.ScriptHash,
                     p.Value
@@ -384,7 +408,7 @@ namespace Neo.Implementations.Blockchains.LevelDB
                 if (accounts.Length > 0)
                     foreach (AccountState account in accounts)
                     {
-                        Fixed8 balance = account.Balances.TryGetValue(SystemShare.Hash, out Fixed8 value) ? value : Fixed8.Zero;
+                        Fixed8 balance = account.Balances.TryGetValue(GoverningToken.Hash, out Fixed8 value) ? value : Fixed8.Zero;
                         if (changes.TryGetValue(account.ScriptHash, out Fixed8 change))
                             balance += change;
                         if (balance <= Fixed8.Zero) continue;
@@ -398,7 +422,7 @@ namespace Neo.Implementations.Blockchains.LevelDB
                     yield return new VoteState
                     {
                         PublicKeys = StandbyValidators,
-                        Count = SystemShare.Amount
+                        Count = GoverningToken.Amount
                     };
             }
         }
@@ -448,6 +472,7 @@ namespace Neo.Implementations.Blockchains.LevelDB
             DbCache<UInt256, AssetState> assets = new DbCache<UInt256, AssetState>(db, DataEntryPrefix.ST_Asset);
             DbCache<UInt160, ContractState> contracts = new DbCache<UInt160, ContractState>(db, DataEntryPrefix.ST_Contract);
             DbCache<StorageKey, StorageItem> storages = new DbCache<StorageKey, StorageItem>(db, DataEntryPrefix.ST_Storage);
+            List<NotifyEventArgs> notifications = new List<NotifyEventArgs>();
             long amount_sysfee = GetSysFeeAmount(block.PrevHash) + (long)block.Transactions.Sum(p => p.SystemFee);
             batch.Put(SliceBuilder.Begin(DataEntryPrefix.DATA_Block).Add(block.Hash), SliceBuilder.Begin().Add(amount_sysfee).Add(block.Trim()));
             foreach (Transaction tx in block.Transactions)
@@ -472,7 +497,7 @@ namespace Neo.Implementations.Blockchains.LevelDB
                     foreach (CoinReference input in group)
                     {
                         unspentcoins.GetAndChange(input.PrevHash).Items[input.PrevIndex] |= CoinState.Spent;
-                        if (tx_prev.Outputs[input.PrevIndex].AssetId.Equals(SystemShare.Hash))
+                        if (tx_prev.Outputs[input.PrevIndex].AssetId.Equals(GoverningToken.Hash))
                         {
                             spentcoins.GetAndChange(input.PrevHash, () => new SpentCoinState
                             {
@@ -535,10 +560,12 @@ namespace Neo.Implementations.Blockchains.LevelDB
                         {
 #pragma warning disable CS0612
                             PublishTransaction publish_tx = (PublishTransaction)tx;
-                            contracts.GetOrAdd(publish_tx.Code.ScriptHash, () => new ContractState
+                            contracts.GetOrAdd(publish_tx.ScriptHash, () => new ContractState
                             {
-                                Code = publish_tx.Code,
-                                HasStorage = publish_tx.NeedStorage,
+                                Script = publish_tx.Script,
+                                ParameterList = publish_tx.ParameterList,
+                                ReturnType = publish_tx.ReturnType,
+                                ContractProperties = (ContractPropertyState)Convert.ToByte(publish_tx.NeedStorage),
                                 Name = publish_tx.Name,
                                 CodeVersion = publish_tx.CodeVersion,
                                 Author = publish_tx.Author,
@@ -552,14 +579,20 @@ namespace Neo.Implementations.Blockchains.LevelDB
                         {
                             InvocationTransaction itx = (InvocationTransaction)tx;
                             CachedScriptTable script_table = new CachedScriptTable(contracts);
-                            StateMachine service = new StateMachine(accounts, validators, assets, contracts, storages);
+                            StateMachine service = new StateMachine(block, accounts, validators, assets, contracts, storages);
                             ApplicationEngine engine = new ApplicationEngine(TriggerType.Application, itx, script_table, service, itx.Gas);
                             engine.LoadScript(itx.Script, false);
-                            if (engine.Execute()) service.Commit();
+                            if (engine.Execute())
+                            {
+                                service.Commit();
+                                notifications.AddRange(service.Notifications);
+                            }
                         }
                         break;
                 }
             }
+            if (notifications.Count > 0)
+                OnNotify(block, notifications.ToArray());
             accounts.DeleteWhere((k, v) => !v.IsFrozen && v.Votes.Length == 0 && v.Balances.All(p => p.Value <= Fixed8.Zero));
             accounts.Commit(batch);
             unspentcoins.DeleteWhere((k, v) => v.Items.All(p => p.HasFlag(CoinState.Spent)));
@@ -591,8 +624,8 @@ namespace Neo.Implementations.Blockchains.LevelDB
                     Block block;
                     lock (block_cache)
                     {
-                        if (!block_cache.ContainsKey(hash)) break;
-                        block = block_cache[hash];
+                        if (!block_cache.TryGetValue(hash, out block))
+                            break;
                     }
                     Persist(block);
                     OnPersistCompleted(block);

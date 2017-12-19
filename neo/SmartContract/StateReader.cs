@@ -1,9 +1,7 @@
 ﻿using Neo.Core;
 using Neo.Cryptography.ECC;
 using Neo.VM;
-using Neo.Wallets;
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using System.Text;
@@ -12,8 +10,8 @@ namespace Neo.SmartContract
 {
     public class StateReader : InteropService
     {
-        public static event EventHandler<NotifyEventArgs> Notify;
-        public static event EventHandler<LogEventArgs> Log;
+        public event EventHandler<NotifyEventArgs> Notify;
+        public event EventHandler<LogEventArgs> Log;
 
         public static readonly StateReader Default = new StateReader();
 
@@ -23,6 +21,7 @@ namespace Neo.SmartContract
             Register("Neo.Runtime.CheckWitness", Runtime_CheckWitness);
             Register("Neo.Runtime.Notify", Runtime_Notify);
             Register("Neo.Runtime.Log", Runtime_Log);
+            Register("Neo.Runtime.GetTime", Runtime_GetTime);
             Register("Neo.Blockchain.GetHeight", Blockchain_GetHeight);
             Register("Neo.Blockchain.GetHeader", Blockchain_GetHeader);
             Register("Neo.Blockchain.GetBlock", Blockchain_GetBlock);
@@ -31,6 +30,7 @@ namespace Neo.SmartContract
             Register("Neo.Blockchain.GetValidators", Blockchain_GetValidators);
             Register("Neo.Blockchain.GetAsset", Blockchain_GetAsset);
             Register("Neo.Blockchain.GetContract", Blockchain_GetContract);
+            Register("Neo.Header.GetIndex", Header_GetIndex);
             Register("Neo.Header.GetHash", Header_GetHash);
             Register("Neo.Header.GetVersion", Header_GetVersion);
             Register("Neo.Header.GetPrevHash", Header_GetPrevHash);
@@ -47,6 +47,7 @@ namespace Neo.SmartContract
             Register("Neo.Transaction.GetInputs", Transaction_GetInputs);
             Register("Neo.Transaction.GetOutputs", Transaction_GetOutputs);
             Register("Neo.Transaction.GetReferences", Transaction_GetReferences);
+            Register("Neo.Transaction.GetUnspentCoins", Transaction_GetUnspentCoins);
             Register("Neo.Attribute.GetUsage", Attribute_GetUsage);
             Register("Neo.Attribute.GetData", Attribute_GetData);
             Register("Neo.Input.GetHash", Input_GetHash);
@@ -127,14 +128,10 @@ namespace Neo.SmartContract
             return true;
         }
 
-        private HashSet<UInt160> _hashes_for_verifying = null;
         protected bool CheckWitness(ExecutionEngine engine, UInt160 hash)
         {
-            if (_hashes_for_verifying == null)
-            {
-                IVerifiable container = (IVerifiable)engine.ScriptContainer;
-                _hashes_for_verifying = new HashSet<UInt160>(container.GetScriptHashesForVerifying());
-            }
+            IVerifiable container = (IVerifiable)engine.ScriptContainer;
+            UInt160[] _hashes_for_verifying = container.GetScriptHashesForVerifying();
             return _hashes_for_verifying.Contains(hash);
         }
 
@@ -168,6 +165,14 @@ namespace Neo.SmartContract
         {
             string message = Encoding.UTF8.GetString(engine.EvaluationStack.Pop().GetByteArray());
             Log?.Invoke(this, new LogEventArgs(engine.ScriptContainer, new UInt160(engine.CurrentContext.ScriptHash), message));
+            return true;
+        }
+
+        protected virtual bool Runtime_GetTime(ExecutionEngine engine)
+        {
+            BlockBase header = Blockchain.Default?.GetHeader(Blockchain.Default.Height);
+            if (header == null) header = Blockchain.GenesisBlock;
+            engine.EvaluationStack.Push(header.Timestamp + Blockchain.SecondsPerBlock);
             return true;
         }
 
@@ -281,6 +286,14 @@ namespace Neo.SmartContract
             ContractState contract = Blockchain.Default.GetContract(hash);
             if (contract == null) return false;
             engine.EvaluationStack.Push(StackItem.FromInterface(contract));
+            return true;
+        }
+
+        protected virtual bool Header_GetIndex(ExecutionEngine engine)
+        {
+            BlockBase header = engine.EvaluationStack.Pop().GetInterface<BlockBase>();
+            if (header == null) return false;
+            engine.EvaluationStack.Push(header.Index);
             return true;
         }
 
@@ -412,6 +425,14 @@ namespace Neo.SmartContract
             Transaction tx = engine.EvaluationStack.Pop().GetInterface<Transaction>();
             if (tx == null) return false;
             engine.EvaluationStack.Push(tx.Inputs.Select(p => StackItem.FromInterface(tx.References[p])).ToArray());
+            return true;
+        }
+
+        protected virtual bool Transaction_GetUnspentCoins(ExecutionEngine engine)
+        {
+            Transaction tx = engine.EvaluationStack.Pop().GetInterface<Transaction>();
+            if (tx == null) return false;
+            engine.EvaluationStack.Push(Blockchain.Default.GetUnspent(tx.Hash).Select(p => StackItem.FromInterface(p)).ToArray());
             return true;
         }
 
@@ -565,7 +586,7 @@ namespace Neo.SmartContract
         {
             ContractState contract = engine.EvaluationStack.Pop().GetInterface<ContractState>();
             if (contract == null) return false;
-            engine.EvaluationStack.Push(contract.Code.Script);
+            engine.EvaluationStack.Push(contract.Script);
             return true;
         }
 

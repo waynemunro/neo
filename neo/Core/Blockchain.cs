@@ -1,8 +1,9 @@
 ﻿using Neo.Cryptography;
 using Neo.Cryptography.ECC;
 using Neo.IO;
+using Neo.IO.Caching;
+using Neo.SmartContract;
 using Neo.VM;
-using Neo.Wallets;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -14,9 +15,7 @@ namespace Neo.Core
     /// </summary>
     public abstract class Blockchain : IDisposable, IScriptTable
     {
-        /// <summary>
-        /// 当区块被写入到硬盘后触发
-        /// </summary>
+        public static event EventHandler<BlockNotifyEventArgs> Notify;
         public static event EventHandler<Block> PersistCompleted;
 
         /// <summary>
@@ -35,7 +34,7 @@ namespace Neo.Core
         public static readonly ECPoint[] StandbyValidators = Settings.Default.StandbyValidators.OfType<string>().Select(p => ECPoint.DecodePoint(p.HexToBytes(), ECCurve.Secp256r1)).ToArray();
 
 #pragma warning disable CS0612
-        public static readonly RegisterTransaction SystemShare = new RegisterTransaction
+        public static readonly RegisterTransaction GoverningToken = new RegisterTransaction
         {
             AssetType = AssetType.GoverningToken,
             Name = "[{\"lang\":\"zh-CN\",\"name\":\"小蚁股\"},{\"lang\":\"en\",\"name\":\"AntShare\"}]",
@@ -49,7 +48,7 @@ namespace Neo.Core
             Scripts = new Witness[0]
         };
 
-        public static readonly RegisterTransaction SystemCoin = new RegisterTransaction
+        public static readonly RegisterTransaction UtilityToken = new RegisterTransaction
         {
             AssetType = AssetType.UtilityToken,
             Name = "[{\"lang\":\"zh-CN\",\"name\":\"小蚁币\"},{\"lang\":\"en\",\"name\":\"AntCoin\"}]",
@@ -89,8 +88,8 @@ namespace Neo.Core
                     Outputs = new TransactionOutput[0],
                     Scripts = new Witness[0]
                 },
-                SystemShare,
-                SystemCoin,
+                GoverningToken,
+                UtilityToken,
                 new IssueTransaction
                 {
                     Attributes = new TransactionAttribute[0],
@@ -99,8 +98,8 @@ namespace Neo.Core
                     {
                         new TransactionOutput
                         {
-                            AssetId = SystemShare.Hash,
-                            Value = SystemShare.Amount,
+                            AssetId = GoverningToken.Hash,
+                            Value = GoverningToken.Amount,
                             ScriptHash = Contract.CreateMultiSigRedeemScript(StandbyValidators.Length / 2 + 1, StandbyValidators).ToScriptHash()
                         }
                     },
@@ -184,13 +183,12 @@ namespace Neo.Core
             List<SpentCoin> unclaimed = new List<SpentCoin>();
             foreach (var group in inputs.GroupBy(p => p.PrevHash))
             {
-                int height_start;
-                Transaction tx = Default.GetTransaction(group.Key, out height_start);
+                Transaction tx = Default.GetTransaction(group.Key, out int height_start);
                 if (tx == null) throw new ArgumentException();
                 if (height_start == height_end) continue;
                 foreach (CoinReference claim in group)
                 {
-                    if (claim.PrevIndex >= tx.Outputs.Length || !tx.Outputs[claim.PrevIndex].AssetId.Equals(SystemShare.Hash))
+                    if (claim.PrevIndex >= tx.Outputs.Length || !tx.Outputs[claim.PrevIndex].AssetId.Equals(GoverningToken.Hash))
                         throw new ArgumentException();
                     unclaimed.Add(new SpentCoin
                     {
@@ -260,6 +258,10 @@ namespace Neo.Core
 
         public abstract bool ContainsUnspent(UInt256 hash, ushort index);
 
+        public abstract DataCache<TKey, TValue> CreateCache<TKey, TValue>()
+            where TKey : IEquatable<TKey>, ISerializable, new()
+            where TValue : class, ISerializable, new();
+
         public abstract void Dispose();
 
         public abstract AccountState GetAccountState(UInt160 script_hash);
@@ -273,7 +275,9 @@ namespace Neo.Core
         /// <returns>返回对应的区块信息</returns>
         public Block GetBlock(uint height)
         {
-            return GetBlock(GetBlockHash(height));
+            UInt256 hash = GetBlockHash(height);
+            if (hash == null) return null;
+            return GetBlock(hash);
         }
 
         /// <summary>
@@ -373,7 +377,7 @@ namespace Neo.Core
 
         byte[] IScriptTable.GetScript(byte[] script_hash)
         {
-            return GetContract(new UInt160(script_hash)).Code.Script;
+            return GetContract(new UInt160(script_hash)).Script;
         }
 
         public abstract StorageItem GetStorageItem(StorageKey key);
@@ -402,8 +406,7 @@ namespace Neo.Core
         /// <returns>返回对应的交易信息</returns>
         public Transaction GetTransaction(UInt256 hash)
         {
-            int height;
-            return GetTransaction(hash, out height);
+            return GetTransaction(hash, out _);
         }
 
         /// <summary>
@@ -424,6 +427,9 @@ namespace Neo.Core
         /// <returns>返回一个交易输出，表示一个未花费的资产</returns>
         public abstract TransactionOutput GetUnspent(UInt256 hash, ushort index);
 
+        public abstract IEnumerable<TransactionOutput> GetUnspent(UInt256 hash);
+
+
         /// <summary>
         /// 获取选票信息
         /// </summary>
@@ -442,6 +448,11 @@ namespace Neo.Core
         /// <returns>返回交易是否双花</returns>
         public abstract bool IsDoubleSpend(Transaction tx);
 
+        protected void OnNotify(Block block, NotifyEventArgs[] notifications)
+        {
+            Notify?.Invoke(this, new BlockNotifyEventArgs(block, notifications));
+        }
+
         /// <summary>
         /// 当区块被写入到硬盘后调用
         /// </summary>
@@ -452,7 +463,7 @@ namespace Neo.Core
             {
                 _validators.Clear();
             }
-            if (PersistCompleted != null) PersistCompleted(this, block);
+            PersistCompleted?.Invoke(this, block);
         }
 
         /// <summary>
@@ -462,9 +473,8 @@ namespace Neo.Core
         /// <returns>返回注册后的区块链实例</returns>
         public static Blockchain RegisterBlockchain(Blockchain blockchain)
         {
-            if (blockchain == null) throw new ArgumentNullException();
             if (Default != null) Default.Dispose();
-            Default = blockchain;
+            Default = blockchain ?? throw new ArgumentNullException();
             return blockchain;
         }
     }

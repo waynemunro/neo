@@ -3,6 +3,7 @@ using Neo.Cryptography;
 using Neo.IO;
 using Neo.Network;
 using Neo.Network.Payloads;
+using Neo.SmartContract;
 using Neo.Wallets;
 using System;
 using System.Collections.Generic;
@@ -13,8 +14,6 @@ namespace Neo.Consensus
 {
     public class ConsensusService : IDisposable
     {
-        public const int MaxTransactionsPerBlock = 500;
-
         private ConsensusContext context = new ConsensusContext();
         private LocalNode localNode;
         private Wallet wallet;
@@ -48,8 +47,8 @@ namespace Neo.Consensus
                 {
                     Log($"send perpare response");
                     context.State |= ConsensusState.SignatureSent;
-                    context.Signatures[context.MyIndex] = context.MakeHeader().Sign(wallet.GetKey(context.Validators[context.MyIndex]));
-                    SignAndRelay(context.MakePerpareResponse(context.Signatures[context.MyIndex]));
+                    context.Signatures[context.MyIndex] = context.MakeHeader().Sign(context.KeyPair);
+                    SignAndRelay(context.MakePrepareResponse(context.Signatures[context.MyIndex]));
                     CheckSignatures();
                 }
                 else
@@ -86,9 +85,9 @@ namespace Neo.Consensus
         {
             if (context.Signatures.Count(p => p != null) >= context.M && context.TransactionHashes.All(p => context.Transactions.ContainsKey(p)))
             {
-                Contract contract = Contract.CreateMultiSigContract(context.Validators[context.MyIndex].EncodePoint(true).ToScriptHash(), context.M, context.Validators);
+                Contract contract = Contract.CreateMultiSigContract(context.M, context.Validators);
                 Block block = context.MakeHeader();
-                SignatureContext sc = new SignatureContext(block);
+                ContractParametersContext sc = new ContractParametersContext(block);
                 for (int i = 0, j = 0; i < context.Validators.Length && j < context.M; i++)
                     if (context.Signatures[i] != null)
                     {
@@ -109,7 +108,7 @@ namespace Neo.Consensus
             Fixed8 amount_netfee = Block.CalculateNetFee(transactions);
             TransactionOutput[] outputs = amount_netfee == Fixed8.Zero ? new TransactionOutput[0] : new[] { new TransactionOutput
             {
-                AssetId = Blockchain.SystemCoin.Hash,
+                AssetId = Blockchain.UtilityToken.Hash,
                 Value = amount_netfee,
                 ScriptHash = wallet.GetChangeAddress()
             } };
@@ -185,7 +184,15 @@ namespace Neo.Consensus
                     if (payload.Version != ConsensusContext.Version || payload.PrevHash != context.PrevHash || payload.BlockIndex != context.BlockIndex)
                         return;
                     if (payload.ValidatorIndex >= context.Validators.Length) return;
-                    ConsensusMessage message = ConsensusMessage.DeserializeFrom(payload.Data);
+                    ConsensusMessage message;
+                    try
+                    {
+                        message = ConsensusMessage.DeserializeFrom(payload.Data);
+                    }
+                    catch (FormatException)
+                    {
+                        return;
+                    }
                     if (message.ViewNumber != context.ViewNumber && message.Type != ConsensusMessageType.ChangeView)
                         return;
                     switch (message.Type)
@@ -193,11 +200,11 @@ namespace Neo.Consensus
                         case ConsensusMessageType.ChangeView:
                             OnChangeViewReceived(payload, (ChangeView)message);
                             break;
-                        case ConsensusMessageType.PerpareRequest:
-                            OnPerpareRequestReceived(payload, (PerpareRequest)message);
+                        case ConsensusMessageType.PrepareRequest:
+                            OnPrepareRequestReceived(payload, (PrepareRequest)message);
                             break;
-                        case ConsensusMessageType.PerpareResponse:
-                            OnPerpareResponseReceived(payload, (PerpareResponse)message);
+                        case ConsensusMessageType.PrepareResponse:
+                            OnPrepareResponseReceived(payload, (PrepareResponse)message);
                             break;
                     }
                 }
@@ -234,9 +241,9 @@ namespace Neo.Consensus
             CheckExpectedView(message.NewViewNumber);
         }
 
-        private void OnPerpareRequestReceived(ConsensusPayload payload, PerpareRequest message)
+        private void OnPrepareRequestReceived(ConsensusPayload payload, PrepareRequest message)
         {
-            Log($"{nameof(OnPerpareRequestReceived)}: height={payload.BlockIndex} view={message.ViewNumber} index={payload.ValidatorIndex} tx={message.TransactionHashes.Length}");
+            Log($"{nameof(OnPrepareRequestReceived)}: height={payload.BlockIndex} view={message.ViewNumber} index={payload.ValidatorIndex} tx={message.TransactionHashes.Length}");
             if (!context.State.HasFlag(ConsensusState.Backup) || context.State.HasFlag(ConsensusState.RequestReceived))
                 return;
             if (payload.ValidatorIndex != context.PrimaryIndex) return;
@@ -250,7 +257,7 @@ namespace Neo.Consensus
             context.Nonce = message.Nonce;
             context.NextConsensus = message.NextConsensus;
             context.TransactionHashes = message.TransactionHashes;
-            if (context.TransactionHashes.Length > MaxTransactionsPerBlock) return;
+            if (context.TransactionHashes.Length > Settings.Default.MaxTransactionsPerBlock) return;
             context.Transactions = new Dictionary<UInt256, Transaction>();
             if (!Crypto.Default.VerifySignature(context.MakeHeader().GetHashData(), message.Signature, context.Validators[payload.ValidatorIndex].EncodePoint(false))) return;
             context.Signatures = new byte[context.Validators.Length][];
@@ -268,9 +275,9 @@ namespace Neo.Consensus
                 localNode.SynchronizeMemoryPool();
         }
 
-        private void OnPerpareResponseReceived(ConsensusPayload payload, PerpareResponse message)
+        private void OnPrepareResponseReceived(ConsensusPayload payload, PrepareResponse message)
         {
-            Log($"{nameof(OnPerpareResponseReceived)}: height={payload.BlockIndex} view={message.ViewNumber} index={payload.ValidatorIndex}");
+            Log($"{nameof(OnPrepareResponseReceived)}: height={payload.BlockIndex} view={message.ViewNumber} index={payload.ValidatorIndex}");
             if (context.State.HasFlag(ConsensusState.BlockSent)) return;
             if (context.Signatures[payload.ValidatorIndex] != null) return;
             Block header = context.MakeHeader();
@@ -294,15 +301,15 @@ namespace Neo.Consensus
                         context.Timestamp = Math.Max(DateTime.Now.ToTimestamp(), Blockchain.Default.GetHeader(context.PrevHash).Timestamp + 1);
                         context.Nonce = GetNonce();
                         List<Transaction> transactions = LocalNode.GetMemoryPool().Where(p => CheckPolicy(p)).ToList();
-                        if (transactions.Count >= MaxTransactionsPerBlock)
-                            transactions = transactions.OrderByDescending(p => p.NetworkFee / p.Size).Take(MaxTransactionsPerBlock - 1).ToList();
+                        if (transactions.Count >= Settings.Default.MaxTransactionsPerBlock)
+                            transactions = transactions.OrderByDescending(p => p.NetworkFee / p.Size).Take(Settings.Default.MaxTransactionsPerBlock - 1).ToList();
                         transactions.Insert(0, CreateMinerTransaction(transactions, context.BlockIndex, context.Nonce));
                         context.TransactionHashes = transactions.Select(p => p.Hash).ToArray();
                         context.Transactions = transactions.ToDictionary(p => p.Hash);
                         context.NextConsensus = Blockchain.GetConsensusAddress(Blockchain.Default.GetValidators(transactions).ToArray());
-                        context.Signatures[context.MyIndex] = context.MakeHeader().Sign(wallet.GetKey(context.Validators[context.MyIndex]));
+                        context.Signatures[context.MyIndex] = context.MakeHeader().Sign(context.KeyPair);
                     }
-                    SignAndRelay(context.MakePerpareRequest());
+                    SignAndRelay(context.MakePrepareRequest());
                     timer.Change(TimeSpan.FromSeconds(Blockchain.SecondsPerBlock << (timer_view + 1)), Timeout.InfiniteTimeSpan);
                 }
                 else if ((context.State.HasFlag(ConsensusState.Primary) && context.State.HasFlag(ConsensusState.RequestSent)) || context.State.HasFlag(ConsensusState.Backup))
@@ -324,16 +331,16 @@ namespace Neo.Consensus
 
         private void SignAndRelay(ConsensusPayload payload)
         {
-            SignatureContext sc;
+            ContractParametersContext sc;
             try
             {
-                sc = new SignatureContext(payload);
+                sc = new ContractParametersContext(payload);
+                wallet.Sign(sc);
             }
             catch (InvalidOperationException)
             {
                 return;
             }
-            wallet.Sign(sc);
             sc.Verifiable.Scripts = sc.GetScripts();
             localNode.RelayDirectly(payload);
         }

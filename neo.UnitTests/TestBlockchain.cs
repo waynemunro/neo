@@ -1,8 +1,8 @@
 ﻿using Neo.Core;
+using Neo.Cryptography.ECC;
+using Neo.IO.Caching;
 using System;
 using System.Collections.Generic;
-using Neo.Cryptography.ECC;
-using Neo.IO;
 
 namespace Neo.UnitTests
 {
@@ -43,6 +43,11 @@ namespace Neo.UnitTests
             throw new NotImplementedException();
         }
 
+        public override DataCache<TKey, TValue> CreateCache<TKey, TValue>()
+        {
+            throw new NotImplementedException();
+        }
+
         public override void Dispose()
         {
             // do nothing
@@ -55,7 +60,9 @@ namespace Neo.UnitTests
 
         public override AssetState GetAssetState(UInt256 asset_id)
         {
-            throw new NotImplementedException();
+            if (asset_id == UInt256.Zero) return null;
+            UInt160 val = new UInt160(TestUtils.GetByteArray(20, asset_id.ToArray()[0]));
+            return new AssetState() { Issuer = val };
         }
 
         public override Block GetBlock(UInt256 hash)
@@ -122,6 +129,11 @@ namespace Neo.UnitTests
         }
 
         public override TransactionOutput GetUnspent(UInt256 hash, ushort index)
+        {
+            throw new NotImplementedException();
+        }
+
+        public override IEnumerable<TransactionOutput> GetUnspent(UInt256 hash)
         {
             throw new NotImplementedException();
         }

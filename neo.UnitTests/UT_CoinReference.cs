@@ -180,7 +180,7 @@ namespace Neo.UnitTests
         }
 
         [TestMethod]
-        public void GetHashCode()
+        public void Class_GetHashCode()
         {
             UInt256 prevHashVal;
             ushort prevIndexVal;
@@ -198,7 +198,7 @@ namespace Neo.UnitTests
 
             JObject jObj = uut.ToJson();
             jObj.Should().NotBeNull();
-            jObj["txid"].AsString().Should().Be("2020202020202020202020202020202020202020202020202020202020202042");
+            jObj["txid"].AsString().Should().Be("0x2020202020202020202020202020202020202020202020202020202020202042");
             jObj["vout"].AsNumber().Should().Be(prevIndexVal);
         }
 
